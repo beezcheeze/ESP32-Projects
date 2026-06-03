@@ -1,2 +1,2 @@
 # ESP32 communication for Android OBDII devices
-![Wiring Diagram]("C:\Users\keshawa.dadallage\Desktop\Aiden\ESP32.jpg")
+![Wiring Diagram](https://github.com/beezcheeze/OBDII/blob/main/ESP32.jpg?raw=true)
