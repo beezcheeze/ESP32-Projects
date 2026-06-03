@@ -58,3 +58,8 @@ Thumbs.db
 
 #other
 #git rm --cached -r <folder>
+ADXL327-Accelerometer
+Bluetooth
+ESP32-blink-rgb-led
+I2C-multiplexer
+screen-control
