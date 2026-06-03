@@ -2,13 +2,15 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <esp_gap_bt_api.h>
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
-#define MUX_ADDR 0x70  // PCA9548A I2C multiplexer address
+#define MUX_ADDR 0x70  // PCA9548A I2C multiplexer address (A2/A1/A0 low)
 #define A0_PIN 32       // Multiplexer address pin A0
 #define A1_PIN 33       // Multiplexer address pin A1
+#define A2_PIN 25       // Multiplexer address pin A2
 #define BLUE_LED_PIN 2  // Typical ESP32 onboard blue LED
 
 // Analog pins for a 3-axis accelerometer module (adjust as needed)
@@ -23,21 +25,56 @@ BluetoothSerial obdSerial;
 Adafruit_SSD1306 display1(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Adafruit_SSD1306 display2(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Adafruit_SSD1306 display3(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306 display4(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306 display5(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 volatile bool connectModeActive = false;
 volatile bool ledState = false;
 volatile bool displaysReady = false;
 volatile unsigned long connectModeStartMs = 0;
 volatile uint8_t connectStage = 0; // 0 = BT Init, 1 = Connecting
+volatile bool obdConnected = false;
+volatile bool btScanActive = false;
+
+static const uint8_t MAX_BT_DEVICES = 4;
+static const uint32_t BT_SCAN_INTERVAL_MS = 30000UL;
+static const uint8_t BT_SCAN_DURATION_SECONDS = 8;
+
+struct BtDeviceEntry {
+  char label[32];
+  int8_t rssi;
+  bool hasRssi;
+  bool valid;
+};
+
+static BtDeviceEntry btDevices[MAX_BT_DEVICES];
+static unsigned long lastBtScanStartMs = 0;
 
 const unsigned long LED_BLINK_INTERVAL_MS = 250;
 const unsigned long LOADING_DRAW_INTERVAL_MS = 1;
 const uint8_t OLED_INIT_RETRIES = 3;
 const unsigned long OLED_BOOT_SPLASH_MS = 900;
 
+static const uint8_t SCREEN1_CHANNEL = 0;
+static const uint8_t SCREEN2_CHANNEL = 1;
+static const uint8_t SCREEN3_CHANNEL = 2;
+static const uint8_t SCREEN4_CHANNEL = 3;
+static const uint8_t SCREEN5_CHANNEL = 4;
+
 void showConnectCounterScreen(Adafruit_SSD1306 &disp, const char *stageTitle, unsigned long elapsedMs);
 void showLoading(Adafruit_SSD1306 &disp, const char *title, unsigned long elapsedMs);
 void showSubaruBootScreen(Adafruit_SSD1306 &disp, unsigned long elapsedMs);
+void showVoltageScreen(Adafruit_SSD1306 &disp, float voltage, unsigned long uptime);
+void showRuntimeScreen(Adafruit_SSD1306 &disp, unsigned long uptime, bool connected);
+void showMessage(Adafruit_SSD1306 &disp, const char *line1, const char *line2);
 bool initOledOnChannel(uint8_t channel, Adafruit_SSD1306 &disp, const char *label);
+void bluetoothScanTask(void *parameter);
+void btGapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
+void clearBtDevices();
+void storeBtDevice(const char *label, int8_t rssi, bool hasRssi);
+void formatBtAddress(const uint8_t *bda, char *buffer, size_t bufferSize);
+void maybeStartBluetoothScan();
+bool isOledPresentOnChannel(uint8_t channel);
+void detectExtraScreenChannels();
 
 void selectChannel(uint8_t channel) {
   if (channel > 7) return;
@@ -89,6 +126,152 @@ bool initOledOnChannel(uint8_t channel, Adafruit_SSD1306 &disp, const char *labe
   return false;
 }
 
+bool isOledPresentOnChannel(uint8_t channel) {
+  disableAllChannels();
+  delay(2);
+  selectChannel(channel);
+  delay(2);
+  Wire.beginTransmission(0x3C);
+  return Wire.endTransmission() == 0;
+}
+
+void detectExtraScreenChannels() {
+  Serial.print("Screen channel map: ");
+  Serial.print(SCREEN1_CHANNEL);
+  Serial.print(", ");
+  Serial.print(SCREEN2_CHANNEL);
+  Serial.print(", ");
+  Serial.print(SCREEN3_CHANNEL);
+  Serial.print(", ");
+  Serial.print(SCREEN4_CHANNEL);
+  Serial.print(", ");
+  Serial.println(SCREEN5_CHANNEL);
+}
+
+void clearBtDevices() {
+  for (uint8_t i = 0; i < MAX_BT_DEVICES; i++) {
+    btDevices[i].label[0] = '\0';
+    btDevices[i].rssi = 0;
+    btDevices[i].hasRssi = false;
+    btDevices[i].valid = false;
+  }
+}
+
+void storeBtDevice(const char *label, int8_t rssi, bool hasRssi) {
+  for (uint8_t i = 0; i < MAX_BT_DEVICES; i++) {
+    if (btDevices[i].valid && strcmp(btDevices[i].label, label) == 0) {
+      btDevices[i].rssi = rssi;
+      btDevices[i].hasRssi = hasRssi;
+      return;
+    }
+  }
+
+  for (uint8_t i = 0; i < MAX_BT_DEVICES; i++) {
+    if (!btDevices[i].valid) {
+      strncpy(btDevices[i].label, label, sizeof(btDevices[i].label) - 1);
+      btDevices[i].label[sizeof(btDevices[i].label) - 1] = '\0';
+      btDevices[i].rssi = rssi;
+      btDevices[i].hasRssi = hasRssi;
+      btDevices[i].valid = true;
+      return;
+    }
+  }
+}
+
+void formatBtAddress(const uint8_t *bda, char *buffer, size_t bufferSize) {
+  snprintf(
+    buffer,
+    bufferSize,
+    "%02X:%02X:%02X:%02X:%02X:%02X",
+    bda[0],
+    bda[1],
+    bda[2],
+    bda[3],
+    bda[4],
+    bda[5]
+  );
+}
+
+void btGapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+  switch (event) {
+    case ESP_BT_GAP_DISC_RES_EVT: {
+      char label[32];
+      label[0] = '\0';
+      int8_t rssi = 0;
+      bool hasRssi = false;
+      bool hasLabel = false;
+
+      for (uint32_t i = 0; i < param->disc_res.num_prop; i++) {
+        const esp_bt_gap_dev_prop_t &prop = param->disc_res.prop[i];
+        if (prop.type == ESP_BT_GAP_DEV_PROP_RSSI && prop.len >= 1) {
+          rssi = *((int8_t *)prop.val);
+          hasRssi = true;
+        }
+
+        if (prop.type == ESP_BT_GAP_DEV_PROP_EIR && prop.val != nullptr && prop.len > 0) {
+          uint8_t nameLen = 0;
+          uint8_t *namePtr = esp_bt_gap_resolve_eir_data((uint8_t *)prop.val, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &nameLen);
+          if (namePtr == nullptr) {
+            namePtr = esp_bt_gap_resolve_eir_data((uint8_t *)prop.val, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &nameLen);
+          }
+
+          if (namePtr != nullptr && nameLen > 0) {
+            size_t copyLen = nameLen;
+            if (copyLen >= sizeof(label)) {
+              copyLen = sizeof(label) - 1;
+            }
+            memcpy(label, namePtr, copyLen);
+            label[copyLen] = '\0';
+            hasLabel = true;
+          }
+        }
+      }
+
+      if (!hasLabel) {
+        formatBtAddress(param->disc_res.bda, label, sizeof(label));
+      }
+
+      storeBtDevice(label, rssi, hasRssi);
+      break;
+    }
+
+    case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
+      btScanActive = (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED);
+      if (!btScanActive) {
+        lastBtScanStartMs = millis();
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
+void maybeStartBluetoothScan() {
+  if (btScanActive) {
+    return;
+  }
+
+  unsigned long now = millis();
+  unsigned long minIntervalMs = obdConnected ? BT_SCAN_INTERVAL_MS : 5000UL;
+  if (lastBtScanStartMs != 0 && (now - lastBtScanStartMs) < minIntervalMs) {
+    return;
+  }
+
+  clearBtDevices();
+  lastBtScanStartMs = now;
+  esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, BT_SCAN_DURATION_SECONDS, 0);
+}
+
+void bluetoothScanTask(void *parameter) {
+  (void)parameter;
+
+  while (true) {
+    maybeStartBluetoothScan();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
 void setBlueLed(bool on) {
   digitalWrite(BLUE_LED_PIN, on ? HIGH : LOW);
 }
@@ -116,14 +299,21 @@ void loadingBarTask(void *parameter) {
 
       const char *title = (connectStage == 0) ? "BT Init" : "Connecting";
 
-      selectChannel(1);
+      selectChannel(SCREEN1_CHANNEL);
       showConnectCounterScreen(display1, title, elapsed);
 
-      selectChannel(2);
+      selectChannel(SCREEN2_CHANNEL);
       showLoading(display2, title, elapsed);
 
-      selectChannel(0);
+      selectChannel(SCREEN3_CHANNEL);
       showSubaruBootScreen(display3, elapsed);
+
+      // Keep remaining screens alive during connect mode so they are not blank.
+      selectChannel(SCREEN4_CHANNEL);
+      showMessage(display4, "OBD Link", "Waiting...");
+
+      selectChannel(SCREEN5_CHANNEL);
+      showRuntimeScreen(display5, elapsed / 1000UL, obdConnected);
 
       vTaskDelay(pdMS_TO_TICKS(LOADING_DRAW_INTERVAL_MS));
     } else {
@@ -138,8 +328,10 @@ void setup() {
 
   pinMode(A0_PIN, OUTPUT);
   pinMode(A1_PIN, OUTPUT);
+  pinMode(A2_PIN, OUTPUT);
   digitalWrite(A0_PIN, LOW);
   digitalWrite(A1_PIN, LOW);
+  digitalWrite(A2_PIN, LOW);
   pinMode(BLUE_LED_PIN, OUTPUT);
   setBlueLed(false);
   xTaskCreatePinnedToCore(ledBlinkTask, "ledBlinkTask", 2048, nullptr, 1, nullptr, 1);
@@ -148,30 +340,45 @@ void setup() {
   Wire.begin();
   Wire.setClock(100000);
   disableAllChannels();
+  detectExtraScreenChannels();
   analogReadResolution(12);
 
-  if (!initOledOnChannel(0, display1, "display 1")) {
+  if (!initOledOnChannel(SCREEN1_CHANNEL, display1, "display 1")) {
     Serial.println("SSD1306 allocation failed for display 1");
     while (true) {
       delay(1000);
     }
   }
 
-  if (!initOledOnChannel(1, display2, "display 2")) {
+  if (!initOledOnChannel(SCREEN2_CHANNEL, display2, "display 2")) {
     Serial.println("SSD1306 allocation failed for display 2");
     while (true) {
       delay(1000);
     }
   }
 
-  if (!initOledOnChannel(2, display3, "display 3")) {
+  if (!initOledOnChannel(SCREEN3_CHANNEL, display3, "display 3")) {
     Serial.println("SSD1306 allocation failed for display 3");
     while (true) {
       delay(1000);
     }
   }
 
-  selectChannel(1);
+  if (!initOledOnChannel(SCREEN4_CHANNEL, display4, "display 4")) {
+    Serial.println("SSD1306 allocation failed for display 4");
+    while (true) {
+      delay(1000);
+    }
+  }
+
+  if (!initOledOnChannel(SCREEN5_CHANNEL, display5, "display 5")) {
+    Serial.println("SSD1306 allocation failed for display 5");
+    while (true) {
+      delay(1000);
+    }
+  }
+
+  selectChannel(SCREEN1_CHANNEL);
   display1.clearDisplay();
   display1.setTextColor(SSD1306_WHITE);
   display1.setTextSize(1);
@@ -180,13 +387,21 @@ void setup() {
   display1.println("Connecting To OBD II");
   display1.display();
 
-  selectChannel(2);
+  selectChannel(SCREEN2_CHANNEL);
   display2.clearDisplay();
   display2.display();
 
-  selectChannel(0);
+  selectChannel(SCREEN3_CHANNEL);
   display3.clearDisplay();
   display3.display();
+
+  selectChannel(SCREEN4_CHANNEL);
+  display4.clearDisplay();
+  display4.display();
+
+  selectChannel(SCREEN5_CHANNEL);
+  display5.clearDisplay();
+  display5.display();
 
   disableAllChannels();
   delay(100);
@@ -207,6 +422,13 @@ void setup() {
     }
   }
 
+  // Start discovery support immediately so nearby devices can be listed
+  // while OBD connection attempts are still in progress.
+  esp_bt_gap_register_callback(btGapCallback);
+  clearBtDevices();
+  lastBtScanStartMs = 0;
+  xTaskCreatePinnedToCore(bluetoothScanTask, "bluetoothScanTask", 4096, nullptr, 1, nullptr, 1);
+
   bool connected = false;
   connectStage = 1;
   while (!connected) {
@@ -218,9 +440,10 @@ void setup() {
 
   connectModeActive = false;
   setBlueLed(true);
+  obdConnected = true;
 
   delay(100);
-  selectChannel(2);
+  selectChannel(SCREEN2_CHANNEL);
   display2.clearDisplay();
   display2.display();
 
@@ -244,20 +467,30 @@ void loop() {
   float accelZ = readAccelAxis(accelZPin);
   unsigned long uptime = millis() / 1000;
 
-  selectChannel(1);
+  selectChannel(SCREEN1_CHANNEL);
   delay(50);
   Serial.println("Updating screen 0");
   showMapScreen(display1, mapKpa, mapInHg, mapPsi);
 
-  selectChannel(2);
+  selectChannel(SCREEN2_CHANNEL);
   delay(50);
   Serial.println("Updating screen 1");
   showStatusScreen(display2, uptime, mapKpa >= 0);
 
-  selectChannel(0);
+  selectChannel(SCREEN3_CHANNEL);
   delay(50);
   Serial.println("Updating screen 2");
   showAccelScreen(display3, accelX, accelY, accelZ);
+
+  selectChannel(SCREEN4_CHANNEL);
+  delay(50);
+  Serial.println("Updating screen 3");
+  showVoltageScreen(display4, mapKpa >= 0 ? (mapKpa / 100.0f) : 0.0f, uptime);
+
+  selectChannel(SCREEN5_CHANNEL);
+  delay(50);
+  Serial.println("Updating screen 4");
+  showRuntimeScreen(display5, uptime, obdConnected);
 
   delay(1000);
 }
@@ -332,6 +565,79 @@ void showStatusScreen(Adafruit_SSD1306 &disp, unsigned long uptime, bool obdOk) 
   disp.print(uptime);
   disp.println("s");
 
+  disp.display();
+}
+
+void showVoltageScreen(Adafruit_SSD1306 &disp, float voltage, unsigned long uptime) {
+  disp.clearDisplay();
+  disp.setTextColor(SSD1306_WHITE);
+  disp.setTextSize(2);
+  disp.setCursor(0, 0);
+  disp.println("VOLT");
+
+  disp.setTextSize(3);
+  disp.setCursor(0, 24);
+  disp.print(String(voltage, 2));
+
+  disp.setTextSize(1);
+  disp.setCursor(0, 52);
+  disp.print("Up:");
+  disp.print(uptime);
+  disp.print("s");
+  disp.display();
+}
+
+void showRuntimeScreen(Adafruit_SSD1306 &disp, unsigned long uptime, bool connected) {
+  disp.clearDisplay();
+  disp.setTextColor(SSD1306_WHITE);
+  disp.setTextSize(1);
+  disp.setCursor(0, 0);
+  disp.println("BT Devices");
+
+  disp.setTextSize(1);
+  disp.setCursor(0, 12);
+  disp.print("OBD: ");
+  disp.println(connected ? "CONNECTED" : "WAITING");
+
+  if (btScanActive) {
+    disp.setCursor(80, 12);
+    disp.print("SCAN");
+  }
+
+  bool drewAny = false;
+  uint8_t row = 0;
+  for (uint8_t i = 0; i < MAX_BT_DEVICES; i++) {
+    if (!btDevices[i].valid) {
+      continue;
+    }
+
+    uint8_t y = 24 + (row * 10);
+    if (y > 48) {
+      break;
+    }
+
+    disp.setCursor(0, y);
+    disp.print(i + 1);
+    disp.print(": ");
+    disp.print(btDevices[i].label);
+    if (btDevices[i].hasRssi) {
+      disp.print(" ");
+      disp.print((int)btDevices[i].rssi);
+      disp.print("dBm");
+    }
+    drewAny = true;
+    row++;
+  }
+
+  if (!drewAny) {
+    disp.setCursor(0, 28);
+    disp.println(btScanActive ? "Scanning..." : "No devices found");
+  }
+
+  disp.setCursor(0, 56);
+  disp.print("Up:");
+  disp.print(uptime);
+  disp.print("s");
   disp.display();
 }
 
@@ -430,7 +736,7 @@ void showSubaruBootScreen(Adafruit_SSD1306 &disp, unsigned long elapsedMs) {
   disp.setTextSize(1);
   disp.setCursor(0, 0);
   disp.print("Vehicle\nIdentification:\n");
-  disp.print("SUBARU WRX");
+  disp.print("2002 SUBARU WRX");
   disp.display();
 }
 
