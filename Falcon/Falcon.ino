@@ -47,6 +47,34 @@ float speedCorrectedFrequencyHz = 0.0f;
 // SCK  = 18, MOSI = 23, MISO = 19
 Adafruit_ST7796S tft(LCD_CS, LCD_RS, LCD_RST);
 
+void drawFordBootScreen() {
+  tft.fillScreen(BG_COLOR);
+
+  uint16_t w = tft.width();
+  uint16_t h = tft.height();
+  const uint16_t logoW = 260;
+  const uint16_t logoH = 120;
+  const uint16_t logoX = (w - logoW) / 2;
+  const uint16_t logoY = (h - logoH) / 2 - 8;
+  const uint8_t logoRadius = 58;
+
+  tft.fillRoundRect(logoX, logoY, logoW, logoH, logoRadius, ST77XX_BLUE);
+  tft.drawRoundRect(logoX, logoY, logoW, logoH, logoRadius, ST77XX_WHITE);
+  tft.drawRoundRect(logoX + 2, logoY + 2, logoW - 4, logoH - 4, logoRadius - 2, ST77XX_WHITE);
+
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLUE);
+  tft.setTextSize(5);
+  tft.setCursor(logoX + 66, logoY + 34);
+  tft.print("Ford");
+
+  tft.setTextColor(ST77XX_WHITE, BG_COLOR);
+  tft.setTextSize(6);
+  tft.setCursor((w / 2) - 220, logoY + logoH + 12);
+  tft.print("Built Shitty");
+
+  delay(5000);
+}
+
 void IRAM_ATTR countSpeedPulse() {
   uint32_t nowUs = micros();
   if ((nowUs - speedLastPulseUs) >= SPEED_MIN_PULSE_GAP_US) {
@@ -74,6 +102,7 @@ void setup() {
   tft.setTextWrap(false);
   tft.fillScreen(ST77XX_BLACK); // force black background
 
+  drawFordBootScreen();
   drawDashboard();
 
   lastSpeedSampleMs = millis();
@@ -85,8 +114,14 @@ void setup() {
 void drawPanel(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                const char* title, const char* value,
                uint16_t borderColor, uint16_t fillColor) {
-  tft.drawRoundRect(x, y, w, h, 8, borderColor);
-  tft.fillRoundRect(x + 2, y + 2, w - 4, h - 4, 6, fillColor);
+  const uint8_t cornerRadius = 8;
+  const uint8_t borderThickness = 3;
+  for (uint8_t i = 0; i < borderThickness; i++) {
+    tft.drawRoundRect(x + i, y + i, w - 2 * i, h - 2 * i, cornerRadius - i, borderColor);
+  }
+  tft.fillRoundRect(x + borderThickness, y + borderThickness,
+                    w - 2 * borderThickness, h - 2 * borderThickness,
+                    cornerRadius - borderThickness, fillColor);
 
   tft.setTextColor(LABEL_COLOR, BG_COLOR);
   tft.setTextSize(1);
@@ -158,7 +193,7 @@ void drawFuelPanel(int percent) {
   tft.println(gallonsText);
 }
 
-void drawSpeedPanel(float mph, float rpm) {
+void drawSpeedPanel(float mph, float rpm, bool fullRedraw = false) {
   uint16_t w = tft.width();
   const uint16_t gap = 6;
   const uint16_t panelW = (w - 3 * gap) / 2;
@@ -174,14 +209,24 @@ void drawSpeedPanel(float mph, float rpm) {
   snprintf(speedPulseText, sizeof(speedPulseText), "PULSES %lu", (unsigned long)speedPulsesPerSample);
   snprintf(speedRpmText, sizeof(speedRpmText), "RPM %.0f", rpm);
 
-  tft.fillRect(gap, topY, panelW, panelH, BG_COLOR);
-  drawPanel(gap, topY, panelW, panelH, "SPEED", speedText, 0x07FF, BG_COLOR);
+  if (fullRedraw) {
+    tft.fillRect(gap, topY, panelW, panelH, BG_COLOR);
+    drawPanel(gap, topY, panelW, panelH, "SPEED", speedText, 0x07FF, BG_COLOR);
+  } else {
+    tft.fillRect(gap + 8, topY + 28, panelW - 16, 20, BG_COLOR);
+    tft.setTextColor(VALUE_COLOR, BG_COLOR);
+    tft.setTextSize(2);
+    tft.setCursor(gap + 8, topY + 28);
+    tft.println(speedText);
+  }
 
   tft.setTextColor(ST77XX_WHITE, BG_COLOR);
   tft.setTextSize(1);
+  tft.fillRect(gap + 8, topY + 58, panelW - 16, 10, BG_COLOR);
   tft.setCursor(gap + 8, topY + 58);
   tft.println(speedModeText);
 
+  tft.fillRect(gap + 8, topY + 70, panelW - 16, 10, BG_COLOR);
   tft.setCursor(gap + 8, topY + 70);
   tft.println(speedPulseText);
 
@@ -202,10 +247,10 @@ void drawDashboard() {
   const uint16_t bottomY = h / 2 + 2;
   const uint16_t panelW = (w - 3 * gap) / 2;
 
-  drawSpeedPanel(speedMph, wheelRpm);
-  drawPanel(w - gap - panelW, topY, panelW, panelH, "RPM", "3200", 0xF800, BG_COLOR);
+  drawSpeedPanel(speedMph, wheelRpm, true);
+  drawPanel(w - gap - panelW, topY, panelW, panelH, "RPM", "0", 0xF800, BG_COLOR);
   drawFuelPanel(fuelPercent);
-  drawPanel(w - gap - panelW, bottomY, panelW, panelH, "TEMP", "190 *F", 0xF81F, BG_COLOR);
+  drawPanel(w - gap - panelW, bottomY, panelW, panelH, "TEMP", "68 *F", 0xF81F, BG_COLOR);
 
   // Divider lines for the physical 480x320 landscape screen
   tft.drawFastVLine(w / 2, 0, h, ST77XX_WHITE);
@@ -298,6 +343,6 @@ void loop() {
     Serial.print("  mph=");
     Serial.println(speedMph, 0);
 
-    drawSpeedPanel(speedMph, wheelRpm);
+    drawSpeedPanel(speedMph, wheelRpm, false);
   }
 }
