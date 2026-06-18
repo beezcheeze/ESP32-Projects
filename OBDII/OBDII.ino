@@ -36,6 +36,9 @@ volatile uint8_t connectStage = 0; // 0 = BT Init, 1 = Connecting
 volatile bool obdConnected = false;
 volatile bool btScanActive = false;
 
+char connectionStatus[24] = "Idle";
+char connectionDetail[32] = "Waiting for adapter";
+
 static const uint8_t MAX_BT_DEVICES = 4;
 static const uint32_t BT_SCAN_INTERVAL_MS = 30000UL;
 static const uint8_t BT_SCAN_DURATION_SECONDS = 8;
@@ -67,6 +70,7 @@ void showSubaruBootScreen(Adafruit_SSD1306 &disp, unsigned long elapsedMs);
 void showVoltageScreen(Adafruit_SSD1306 &disp, float voltage, unsigned long uptime);
 void showRuntimeScreen(Adafruit_SSD1306 &disp, unsigned long uptime, bool connected);
 void showMessage(Adafruit_SSD1306 &disp, const char *line1, const char *line2);
+void updateConnectionStatus(const char *status, const char *detail);
 bool initOledOnChannel(uint8_t channel, Adafruit_SSD1306 &disp, const char *label);
 void bluetoothScanTask(void *parameter);
 void btGapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
@@ -273,6 +277,17 @@ void bluetoothScanTask(void *parameter) {
   }
 }
 
+void updateConnectionStatus(const char *status, const char *detail) {
+  if (status != nullptr) {
+    strncpy(connectionStatus, status, sizeof(connectionStatus) - 1);
+    connectionStatus[sizeof(connectionStatus) - 1] = '\0';
+  }
+  if (detail != nullptr) {
+    strncpy(connectionDetail, detail, sizeof(connectionDetail) - 1);
+    connectionDetail[sizeof(connectionDetail) - 1] = '\0';
+  }
+}
+
 void setBlueLed(bool on) {
   digitalWrite(BLUE_LED_PIN, on ? HIGH : LOW);
 }
@@ -311,7 +326,7 @@ void loadingBarTask(void *parameter) {
 
       // Keep remaining screens alive during connect mode so they are not blank.
       selectChannel(SCREEN4_CHANNEL);
-      showMessage(display4, "OBD Link", "Waiting...");
+      showMessage(display4, connectionStatus, connectionDetail);
 
       selectChannel(SCREEN5_CHANNEL);
       showRuntimeScreen(display5, elapsed / 1000UL, obdConnected);
@@ -411,17 +426,24 @@ void setup() {
   xTaskCreatePinnedToCore(loadingBarTask, "loadingBarTask", 3072, nullptr, 1, nullptr, 1);
 
   Serial.println("Initializing Bluetooth...");
+  updateConnectionStatus("BT init", "Starting ESP32 BT stack");
   connectModeActive = true;
   connectModeStartMs = millis();
   bool btReady = false;
   connectStage = 0;
   while (!btReady) {
-    btReady = obdSerial.begin("ESP32_OBD", true);
+    // Many ELM327 / BAFX-style OBD adapters pair more reliably in legacy mode.
+    // Use the standard device name and disable SSP here to avoid handshake issues.
+    updateConnectionStatus("BT init", "Starting adapter session");
+    btReady = obdSerial.begin("ESP32_OBD", false);
     if (!btReady) {
       Serial.println("Bluetooth init failed, retrying...");
+      updateConnectionStatus("BT retry", "BT init failed, retrying");
       delay(300);
     }
   }
+
+  updateConnectionStatus("BT ready", "Scanning for OBDII adapter");
 
   // Start discovery support immediately so nearby devices can be listed
   // while OBD connection attempts are still in progress.
@@ -433,8 +455,11 @@ void setup() {
   bool connected = false;
   connectStage = 1;
   while (!connected) {
+    updateConnectionStatus("Connecting", "Trying OBDII adapter");
     connected = obdSerial.connect(obdDeviceName);
     if (!connected) {
+      Serial.println("Connection attempt failed, retrying...");
+      updateConnectionStatus("Retrying", "Waiting for OBDII link");
       delay(500);
     }
   }
@@ -442,6 +467,7 @@ void setup() {
   connectModeActive = false;
   setBlueLed(true);
   obdConnected = true;
+  updateConnectionStatus("Connected", "OBDII link established");
 
   delay(100);
   selectChannel(SCREEN2_CHANNEL);
@@ -457,6 +483,7 @@ void setup() {
   runInitCommand("ATS0");     // Spaces off
   runInitCommand("ATH0");     // Headers off
   runInitCommand("ATSP0");    // Automatic protocol
+  runInitCommand("ATSH 7E0"); // Select the engine ECU (E1) address
 }
 
 void loop() {
@@ -600,6 +627,13 @@ void showRuntimeScreen(Adafruit_SSD1306 &disp, unsigned long uptime, bool connec
   disp.print("OBD: ");
   disp.println(connected ? "CONNECTED" : "WAITING");
 
+  disp.setCursor(0, 24);
+  disp.print("Status: ");
+  disp.println(connectionStatus);
+
+  disp.setCursor(0, 36);
+  disp.println(connectionDetail);
+
   if (btScanActive) {
     disp.setCursor(80, 12);
     disp.print("SCAN");
@@ -612,8 +646,8 @@ void showRuntimeScreen(Adafruit_SSD1306 &disp, unsigned long uptime, bool connec
       continue;
     }
 
-    uint8_t y = 24 + (row * 10);
-    if (y > 48) {
+    uint8_t y = 42 + (row * 9);
+    if (y > 56) {
       break;
     }
 
@@ -631,7 +665,7 @@ void showRuntimeScreen(Adafruit_SSD1306 &disp, unsigned long uptime, bool connec
   }
 
   if (!drewAny) {
-    disp.setCursor(0, 28);
+    disp.setCursor(0, 48);
     disp.println(btScanActive ? "Scanning..." : "No devices found");
   }
 
