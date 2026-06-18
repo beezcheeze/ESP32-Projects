@@ -16,12 +16,16 @@ const float SPEED_PULSES_PER_REVOLUTION = 16.0f;
 // Set this to your tire circumference in inches to get true MPH.
 // If you leave it at 0, the display will show wheel RPM but MPH will stay 0.
 const float WHEEL_CIRCUMFERENCE_INCHES = 0.0f;
-const float SPEED_DIVIDER_TOP_OHMS = 470.0f;
-const float SPEED_DIVIDER_BOTTOM_OHMS = 680.0f;
-const uint32_t SPEED_SAMPLE_WINDOW_MS = 5000;
-const uint32_t SPEED_POLL_INTERVAL_MS = 2;
-const float SPEED_HIGH_THRESHOLD_VOLTS = 1.8f;
-const float SPEED_LOW_THRESHOLD_VOLTS = 1.1f;
+const float SPEED_AXLE_RATIO = 3.73f;
+const float SPEED_TIRE_REVOLUTIONS_PER_MILE = 800.0f;
+const float SPEED_PULSES_PER_MILE = SPEED_PULSES_PER_REVOLUTION * SPEED_AXLE_RATIO * SPEED_TIRE_REVOLUTIONS_PER_MILE;
+const uint32_t SPEED_SAMPLE_WINDOW_MS = 500;
+const uint32_t SPEED_MIN_PULSE_GAP_US = 120;
+const int SPEED_INTERRUPT_MODE = RISING;
+const bool SPEED_USE_INTERNAL_PULLUP = false;
+const float SPEED_FREQ_FILTER_ALPHA = 0.25f;
+const float SPEED_ZERO_HOLD_HZ = 0.5f;
+const float SPEED_IDLE_BIAS_HZ = 350.0f;
 
 #define BG_COLOR      0x0000  // black
 #define LABEL_COLOR   0xFFFF  // white
@@ -30,30 +34,36 @@ const float SPEED_LOW_THRESHOLD_VOLTS = 1.1f;
 
 int fuelPercent = 0;
 volatile uint32_t speedPulseCount = 0;
+volatile uint32_t speedLastPulseUs = 0;
 float speedMph = 0.0f;
 float wheelRpm = 0.0f;
 uint32_t lastSpeedSampleMs = 0;
-float speedAdcVolts = 0.0f;
-float speedSignalVolts = 0.0f;
 uint32_t speedPulsesPerSample = 0;
-uint32_t speedRawAccum = 0;
-uint32_t speedRawSamples = 0;
-uint32_t speedLastVoltageSampleMs = 0;
-int speedLastSampleState = LOW;
-uint32_t speedLastPollMs = 0;
+float speedFrequencyHz = 0.0f;
+float speedRawFrequencyHz = 0.0f;
+float speedCorrectedFrequencyHz = 0.0f;
 
 // Use the standard SPI hardware pins on ESP32:
 // SCK  = 18, MOSI = 23, MISO = 19
 Adafruit_ST7796S tft(LCD_CS, LCD_RS, LCD_RST);
+
+void IRAM_ATTR countSpeedPulse() {
+  uint32_t nowUs = micros();
+  if ((nowUs - speedLastPulseUs) >= SPEED_MIN_PULSE_GAP_US) {
+    speedPulseCount++;
+    speedLastPulseUs = nowUs;
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   delay(100);
 
   pinMode(FUEL_ADC_PIN, INPUT);
-  pinMode(SPEED_PULSE_PIN, INPUT);
+  pinMode(SPEED_PULSE_PIN, SPEED_USE_INTERNAL_PULLUP ? INPUT_PULLUP : INPUT);
   pinMode(LCD_LED, OUTPUT);
   digitalWrite(LCD_LED, HIGH);  // turn on backlight
+  attachInterrupt(digitalPinToInterrupt(SPEED_PULSE_PIN), countSpeedPulse, SPEED_INTERRUPT_MODE);
 
   // Configure SPI with the pins you specified.
   SPI.begin(18, 19, 23, 13);
@@ -67,8 +77,7 @@ void setup() {
   drawDashboard();
 
   lastSpeedSampleMs = millis();
-  speedLastVoltageSampleMs = lastSpeedSampleMs;
-  speedLastPollMs = lastSpeedSampleMs;
+  speedLastPulseUs = micros();
 
   Serial.println("ST7796 display initialized.");
 }
@@ -157,11 +166,11 @@ void drawSpeedPanel(float mph, float rpm) {
   const uint16_t topY = 6;
 
   char speedText[24];
-  char speedVoltText[32];
+  char speedModeText[24];
   char speedPulseText[24];
   char speedRpmText[24];
-  snprintf(speedText, sizeof(speedText), "%.1f MPH", mph);
-  snprintf(speedVoltText, sizeof(speedVoltText), "PIN %.2fV  SRC %.2fV", speedAdcVolts, speedSignalVolts);
+  snprintf(speedText, sizeof(speedText), "%.0f MPH", mph);
+  snprintf(speedModeText, sizeof(speedModeText), "RAW %.0f COR %.0f", speedRawFrequencyHz, speedCorrectedFrequencyHz);
   snprintf(speedPulseText, sizeof(speedPulseText), "PULSES %lu", (unsigned long)speedPulsesPerSample);
   snprintf(speedRpmText, sizeof(speedRpmText), "RPM %.0f", rpm);
 
@@ -171,7 +180,7 @@ void drawSpeedPanel(float mph, float rpm) {
   tft.setTextColor(ST77XX_WHITE, BG_COLOR);
   tft.setTextSize(1);
   tft.setCursor(gap + 8, topY + 58);
-  tft.println(speedVoltText);
+  tft.println(speedModeText);
 
   tft.setCursor(gap + 8, topY + 70);
   tft.println(speedPulseText);
@@ -226,60 +235,68 @@ void loop() {
     }
   }
 
-  if (now - speedLastVoltageSampleMs >= 250) {
-    int speedRaw = analogRead(SPEED_PULSE_PIN);
-
-    speedRawAccum += (uint32_t)speedRaw;
-    speedRawSamples++;
-    speedAdcVolts = (speedRawAccum / (float)speedRawSamples) * (3.3f / 4095.0f);
-    speedSignalVolts = speedAdcVolts * ((SPEED_DIVIDER_TOP_OHMS + SPEED_DIVIDER_BOTTOM_OHMS) / SPEED_DIVIDER_BOTTOM_OHMS);
-    speedLastVoltageSampleMs = now;
-  }
-
-  if (now - speedLastPollMs >= SPEED_POLL_INTERVAL_MS) {
-    int speedRaw = analogRead(SPEED_PULSE_PIN);
-    float speedSampleVolts = speedRaw * (3.3f / 4095.0f);
-    int speedState = speedLastSampleState;
-
-    if (speedSampleVolts >= SPEED_HIGH_THRESHOLD_VOLTS) {
-      speedState = HIGH;
-    } else if (speedSampleVolts <= SPEED_LOW_THRESHOLD_VOLTS) {
-      speedState = LOW;
-    }
-
-    if (speedLastSampleState == LOW && speedState == HIGH) {
-      speedPulseCount++;
-    }
-
-    speedLastSampleState = speedState;
-    speedLastPollMs = now;
-  }
-
   if (now - lastSpeedSampleMs >= SPEED_SAMPLE_WINDOW_MS) {
+    noInterrupts();
     uint32_t pulseCount = speedPulseCount;
     speedPulseCount = 0;
+    interrupts();
 
-    speedPulsesPerSample = pulseCount;
-    speedRawAccum = 0;
-    speedRawSamples = 0;
-
-    float elapsedHours = (now - lastSpeedSampleMs) / 3600000.0f;
+    uint32_t elapsedMs = now - lastSpeedSampleMs;
+    float elapsedHours = elapsedMs / 3600000.0f;
     lastSpeedSampleMs = now;
 
     if (elapsedHours > 0.0f) {
-      float wheelRevolutions = pulseCount / SPEED_PULSES_PER_REVOLUTION;
-      wheelRpm = wheelRevolutions / elapsedHours / 60.0f;
+      speedRawFrequencyHz = pulseCount * (1000.0f / elapsedMs);
+      speedCorrectedFrequencyHz = speedRawFrequencyHz - SPEED_IDLE_BIAS_HZ;
+      if (speedCorrectedFrequencyHz < 0.0f) {
+        speedCorrectedFrequencyHz = 0.0f;
+      }
 
-      if (WHEEL_CIRCUMFERENCE_INCHES > 0.0f) {
-        speedMph = (wheelRevolutions / elapsedHours) * (WHEEL_CIRCUMFERENCE_INCHES / 63360.0f);
+      speedFrequencyHz = (SPEED_FREQ_FILTER_ALPHA * speedCorrectedFrequencyHz) +
+                         ((1.0f - SPEED_FREQ_FILTER_ALPHA) * speedFrequencyHz);
+
+      if (speedFrequencyHz < SPEED_ZERO_HOLD_HZ) {
+        speedFrequencyHz = 0.0f;
+      }
+
+      speedPulsesPerSample = (uint32_t)((speedCorrectedFrequencyHz * elapsedMs / 1000.0f) + 0.5f);
+
+      float filteredRevolutions = (speedFrequencyHz * elapsedMs / 1000.0f) / SPEED_PULSES_PER_REVOLUTION;
+      wheelRpm = filteredRevolutions / elapsedHours / 60.0f;
+
+      if (SPEED_PULSES_PER_MILE > 0.0f) {
+        speedMph = (speedFrequencyHz * 3600.0f) / SPEED_PULSES_PER_MILE;
+      } else if (WHEEL_CIRCUMFERENCE_INCHES > 0.0f) {
+        speedMph = (filteredRevolutions / elapsedHours) * (WHEEL_CIRCUMFERENCE_INCHES / 63360.0f);
       } else {
         speedMph = 0.0f;
       }
     }
 
-    if (pulseCount == 0 && speedMph < 0.5f) {
-      speedMph = 0.0f;
+    if (pulseCount == 0) {
+      speedFrequencyHz *= 0.7f;
+      if (speedFrequencyHz < SPEED_ZERO_HOLD_HZ) {
+        wheelRpm = 0.0f;
+        speedMph = 0.0f;
+        speedFrequencyHz = 0.0f;
+        speedCorrectedFrequencyHz = 0.0f;
+        speedPulsesPerSample = 0;
+      }
     }
+
+    Serial.print("Speed pulses=");
+    Serial.print((unsigned long)pulseCount);
+    Serial.print("  raw=");
+    Serial.print(speedRawFrequencyHz, 1);
+    Serial.print("  corr=");
+    Serial.print(speedCorrectedFrequencyHz, 1);
+    Serial.print("  freq=");
+    Serial.print(speedFrequencyHz, 1);
+    Serial.print(" Hz");
+    Serial.print("  rpm=");
+    Serial.print(wheelRpm, 1);
+    Serial.print("  mph=");
+    Serial.println(speedMph, 0);
 
     drawSpeedPanel(speedMph, wheelRpm);
   }
