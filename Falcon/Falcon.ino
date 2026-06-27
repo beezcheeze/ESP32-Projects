@@ -42,6 +42,8 @@ const float SPEED_CAL_TRUE_MPH_2 = 15.0f;
 // which maps back to an estimated pre-calibration speed of ~9.94 MPH.
 const float SPEED_CAL_DISPLAY_MPH_3 = 9.94f;
 const float SPEED_CAL_TRUE_MPH_3 = 35.0f;
+const float SPEED_DIAL_MAX_MPH = 80.0f;
+const uint16_t DASH_TOP_OFFSET_PX = 20;
 const uint32_t FUEL_SAMPLE_INTERVAL_MS = 60000;
 const uint32_t FUEL_SUBSAMPLE_INTERVAL_MS = 5000;
 const uint8_t FUEL_MODE_WINDOW_SAMPLES = (uint8_t)(FUEL_SAMPLE_INTERVAL_MS / FUEL_SUBSAMPLE_INTERVAL_MS);
@@ -80,6 +82,8 @@ bool speedAnalogPulseArmed = true;
 float speedGraphMph[SPEED_GRAPH_POINTS] = {0.0f};
 uint8_t speedGraphWriteIndex = 0;
 uint8_t speedGraphCount = 0;
+int16_t speedNeedlePrevX = -1;
+int16_t speedNeedlePrevY = -1;
 
 // Use the standard SPI hardware pins on ESP32:
 // SCK  = 18, MOSI = 23, MISO = 19
@@ -380,11 +384,28 @@ int readFuelPercent() {
 
 void drawFuelPanel(int percent) {
   uint16_t w = tft.width();
-  const uint16_t gap = 6;
-  const uint16_t panelW = (w - 3 * gap) / 2;
-  const uint16_t panelH = 92;
-  const uint16_t bottomY = tft.height() / 2 + 2;
-  (void)panelH;
+  uint16_t h = tft.height();
+  const uint16_t outerGap = 6;
+  const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
+  const uint16_t splitGap = 8;
+  const uint16_t rightGap = 6;
+  const uint16_t barH = 22;
+  const uint16_t contentH = h - topGap - outerGap - barH;
+  const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
+  const uint16_t rightX = outerGap + leftW + splitGap;
+  const uint16_t rightW = w - outerGap - rightX;
+  const uint16_t rightPanelH = (contentH - (2 * rightGap)) / 3;
+  const uint16_t fuelY = topGap;
+
+  const uint16_t valueX = rightX + 8;
+  const uint16_t valueY = fuelY + 22;
+  const uint16_t valueW = rightW - 16;
+  const uint16_t infoY = fuelY + 54;
+  const uint16_t gaugeX = rightX + 8;
+  const uint16_t gaugeY = fuelY + rightPanelH - 16;
+  const uint16_t gaugeW = rightW - 16;
+  const uint16_t gaugeH = 10;
+
   const float tankGallons = 10.0f * (percent / 100.0f);
 
   char fuelText[24];
@@ -396,25 +417,21 @@ void drawFuelPanel(int percent) {
 
   // Keep panel border static; only refresh value regions.
   tft.setTextColor(VALUE_COLOR, BG_COLOR);
-  tft.setTextSize(2);
-  tft.fillRect(gap + 8, bottomY + 28, panelW - 16, 16, BG_COLOR);
-  tft.setCursor(gap + 8, bottomY + 28);
+  tft.setTextSize(3);
+  tft.fillRect(valueX, valueY, valueW, 24, BG_COLOR);
+  tft.setCursor(valueX, valueY);
   tft.println(fuelText);
 
   tft.setTextColor(ST77XX_WHITE, BG_COLOR);
   tft.setTextSize(1);
-  tft.fillRect(gap + 8, bottomY + 58, panelW - 16, 18, BG_COLOR);
-  tft.setCursor(gap + 8, bottomY + 58);
+  tft.fillRect(valueX, infoY, valueW, 14, BG_COLOR);
+  tft.setCursor(valueX, infoY);
   tft.println(gallonsText);
 
-  tft.setCursor(gap + 8, bottomY + 68);
+  tft.setCursor(valueX + 74, infoY);
   tft.println(voltageText);
 
   // Draw a horizontal fuel gauge bar under the text.
-  const uint16_t gaugeX = gap + 8;
-  const uint16_t gaugeY = bottomY + 74;
-  const uint16_t gaugeW = panelW - 16;
-  const uint16_t gaugeH = 16;
   const uint16_t gaugeFillW = (uint16_t)((gaugeW - 2) * (percent / 100.0f));
   uint16_t gaugeColor = ST77XX_GREEN;
   if (percent < 25) {
@@ -435,41 +452,143 @@ void drawFuelPanel(int percent) {
   tft.drawFastVLine(marker1X, gaugeY + 1, gaugeH - 2, ST77XX_WHITE);
   tft.drawFastVLine(marker2X, gaugeY + 1, gaugeH - 2, ST77XX_WHITE);
   tft.drawFastVLine(marker3X, gaugeY + 1, gaugeH - 2, ST77XX_WHITE);
+
+  tft.drawRect(gaugeX, gaugeY, gaugeW, gaugeH, ST77XX_WHITE);
 }
 
-void drawSpeedPanel(float mph, float rpm, bool fullRedraw = false) {
-  (void)rpm;
-  (void)fullRedraw;
-
+void drawTempPanel(float tempF) {
   uint16_t w = tft.width();
-  const uint16_t gap = 6;
-  const uint16_t panelW = (w - 3 * gap) / 2;
-  const uint16_t panelH = 92;
-  const uint16_t topY = 6;
-  const uint16_t graphW = 34;
-  const uint16_t graphX = gap + panelW - 8 - graphW;
-  const uint16_t graphY = topY + 20;
-  const uint16_t graphH = panelH - 24;
-  const uint16_t numberX = gap + 8;
-  const uint16_t numberW = graphX - numberX - 6;
+  uint16_t h = tft.height();
+  const uint16_t outerGap = 6;
+  const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
+  const uint16_t splitGap = 8;
+  const uint16_t rightGap = 6;
+  const uint16_t barH = 22;
+  const uint16_t contentH = h - topGap - outerGap - barH;
+  const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
+  const uint16_t rightX = outerGap + leftW + splitGap;
+  const uint16_t rightW = w - outerGap - rightX;
+  const uint16_t rightPanelH = (contentH - (2 * rightGap)) / 3;
+  const uint16_t tempY = topGap + rightPanelH + rightGap;
 
-  char speedText[12];
-  int speedRounded = (int)roundf(mph);
-  snprintf(speedText, sizeof(speedText), "%d", speedRounded);
-
-  addSpeedGraphSample(mph);
+  char tempText[24];
+  snprintf(tempText, sizeof(tempText), "%.0f F", tempF);
 
   tft.setTextColor(VALUE_COLOR, BG_COLOR);
-  tft.setTextSize(5);
-  int16_t textX = numberX + ((int16_t)numberW - ((int16_t)strlen(speedText) * 6 * 5)) / 2;
-  if (textX < (int16_t)numberX) {
-    textX = numberX;
-  }
-  tft.fillRect(numberX, topY + 18, numberW, 34, BG_COLOR);
-  tft.setCursor(textX, topY + 20);
-  tft.print(speedText);
+  tft.setTextSize(3);
+  tft.fillRect(rightX + 8, tempY + 22, rightW - 16, 28, BG_COLOR);
+  tft.setCursor(rightX + 8, tempY + 24);
+  tft.print(tempText);
 
+  tft.setTextColor(ST77XX_WHITE, BG_COLOR);
+  tft.setTextSize(1);
+  tft.fillRect(rightX + 8, tempY + 56, rightW - 16, 12, BG_COLOR);
+  tft.setCursor(rightX + 8, tempY + 58);
+  tft.print("Coolant");
+}
+
+void drawSpeedGraphPanel(float mph) {
+  uint16_t w = tft.width();
+  uint16_t h = tft.height();
+  const uint16_t outerGap = 6;
+  const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
+  const uint16_t splitGap = 8;
+  const uint16_t rightGap = 6;
+  const uint16_t barH = 22;
+  const uint16_t contentH = h - topGap - outerGap - barH;
+  const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
+  const uint16_t rightX = outerGap + leftW + splitGap;
+  const uint16_t rightW = w - outerGap - rightX;
+  const uint16_t rightPanelH = (contentH - (2 * rightGap)) / 3;
+  const uint16_t graphPanelY = topGap + (2 * rightPanelH) + (2 * rightGap);
+  const uint16_t graphX = rightX + 8;
+  const uint16_t graphY = graphPanelY + 22;
+  const uint16_t graphW = rightW - 16;
+  const uint16_t graphH = rightPanelH - 30;
+
+  addSpeedGraphSample(mph);
   drawSpeedGraph(graphX, graphY, graphW, graphH, false);
+}
+
+void drawSpeedDial(float mph, bool fullRedraw = false) {
+  uint16_t w = tft.width();
+  uint16_t h = tft.height();
+  const uint16_t outerGap = 6;
+  const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
+  const uint16_t splitGap = 8;
+  const uint16_t barH = 22;
+  const uint16_t contentH = h - topGap - outerGap - barH;
+  const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
+  const uint16_t leftX = outerGap;
+  const uint16_t leftY = topGap;
+
+  int16_t cx = leftX + (leftW / 2);
+  int16_t cy = leftY + (contentH / 2) + 8;
+  int16_t radius = min((int16_t)leftW, (int16_t)contentH) / 2 - 24;
+
+  if (fullRedraw) {
+    tft.fillRoundRect(leftX, leftY, leftW, contentH, 10, BG_COLOR);
+    tft.drawRoundRect(leftX, leftY, leftW, contentH, 10, 0x07FF);
+
+    tft.drawCircle(cx, cy, radius + 8, ST77XX_WHITE);
+    tft.drawCircle(cx, cy, radius + 7, ST77XX_WHITE);
+    tft.drawCircle(cx, cy, radius - 1, 0x7BEF);
+
+    for (int mphTick = 0; mphTick <= (int)SPEED_DIAL_MAX_MPH; mphTick += 10) {
+      float ratio = mphTick / SPEED_DIAL_MAX_MPH;
+      float angleDeg = -140.0f + (280.0f * ratio);
+      float angleRad = angleDeg * 0.0174532925f;
+
+      int16_t outerX = cx + (int16_t)((radius + 6) * cosf(angleRad));
+      int16_t outerY = cy + (int16_t)((radius + 6) * sinf(angleRad));
+      int16_t innerX = cx + (int16_t)((radius - 8) * cosf(angleRad));
+      int16_t innerY = cy + (int16_t)((radius - 8) * sinf(angleRad));
+      tft.drawLine(innerX, innerY, outerX, outerY, ST77XX_WHITE);
+
+      int16_t labelX = cx + (int16_t)((radius - 24) * cosf(angleRad));
+      int16_t labelY = cy + (int16_t)((radius - 24) * sinf(angleRad));
+      char tickLabel[6];
+      snprintf(tickLabel, sizeof(tickLabel), "%d", mphTick);
+      tft.setTextColor(ST77XX_WHITE, BG_COLOR);
+      tft.setTextSize(1);
+      tft.setCursor(labelX - 6, labelY - 3);
+      tft.print(tickLabel);
+    }
+
+    tft.setTextColor(ST77XX_WHITE, BG_COLOR);
+    tft.setTextSize(2);
+    tft.setCursor(cx - 24, cy + radius - 6);
+    tft.print("MPH");
+
+    speedNeedlePrevX = -1;
+    speedNeedlePrevY = -1;
+  }
+
+  if (speedNeedlePrevX >= 0 && speedNeedlePrevY >= 0) {
+    tft.drawLine(cx, cy, speedNeedlePrevX, speedNeedlePrevY, BG_COLOR);
+  }
+
+  float clampedMph = constrain(mph, 0.0f, SPEED_DIAL_MAX_MPH);
+  float angleDeg = -140.0f + (280.0f * (clampedMph / SPEED_DIAL_MAX_MPH));
+  float angleRad = angleDeg * 0.0174532925f;
+
+  int16_t needleX = cx + (int16_t)((radius - 14) * cosf(angleRad));
+  int16_t needleY = cy + (int16_t)((radius - 14) * sinf(angleRad));
+  tft.drawLine(cx, cy, needleX, needleY, ST77XX_RED);
+  tft.fillCircle(cx, cy, 4, ST77XX_WHITE);
+
+  speedNeedlePrevX = needleX;
+  speedNeedlePrevY = needleY;
+
+  int speedRounded = (int)roundf(mph);
+  char speedText[12];
+  snprintf(speedText, sizeof(speedText), "%d", speedRounded);
+  tft.setTextColor(VALUE_COLOR, BG_COLOR);
+  tft.setTextSize(4);
+  tft.fillRect(cx - 42, cy + 8, 84, 30, BG_COLOR);
+  int16_t speedTextX = cx - ((int16_t)strlen(speedText) * 24) / 2;
+  tft.setCursor(speedTextX, cy + 10);
+  tft.print(speedText);
 }
 
 void drawDashboard() {
@@ -479,43 +598,38 @@ void drawDashboard() {
 
   tft.fillScreen(BG_COLOR);  // force black background every time
 
-  const uint16_t gap = 6;
-  const uint16_t panelH = 92;
-  const uint16_t topY = 6;
-  const uint16_t bottomY = h / 2 + 2;
-  const uint16_t panelW = (w - 3 * gap) / 2;
-  const uint16_t speedGraphW = 34;
-  const uint16_t speedGraphX = gap + panelW - 8 - speedGraphW;
-  const uint16_t speedGraphY = topY + 20;
-  const uint16_t speedGraphH = panelH - 24;
+  const uint16_t outerGap = 6;
+  const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
+  const uint16_t splitGap = 8;
+  const uint16_t rightGap = 6;
+  const uint16_t barH = 22;
+  const uint16_t contentH = h - topGap - outerGap - barH;
+  const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
+  const uint16_t rightX = outerGap + leftW + splitGap;
+  const uint16_t rightW = w - outerGap - rightX;
+  const uint16_t rightPanelH = (contentH - (2 * rightGap)) / 3;
+  const uint16_t fuelY = topGap;
+  const uint16_t tempY = fuelY + rightPanelH + rightGap;
+  const uint16_t rpmY = tempY + rightPanelH + rightGap;
 
-  drawPanel(gap, topY, panelW, panelH, "SPEED", "", 0x07FF, BG_COLOR);
-  drawPanel(w - gap - panelW, topY, panelW, panelH, "RPM", "0", 0xF800, BG_COLOR);
-  drawPanel(gap, bottomY, panelW, panelH, "FUEL", "", 0x07E0, BG_COLOR);
-  drawPanel(w - gap - panelW, bottomY, panelW, panelH, "TEMP", "68 *F", 0xF81F, BG_COLOR);
+  drawPanel(rightX, fuelY, rightW, rightPanelH, "FUEL", "", 0x07E0, BG_COLOR);
+  drawPanel(rightX, tempY, rightW, rightPanelH, "TEMP", "", 0xF81F, BG_COLOR);
+  drawPanel(rightX, rpmY, rightW, rightPanelH, "SPEED GRAPH", "", 0xF800, BG_COLOR);
 
   // Divider lines for the physical 480x320 landscape screen
-  tft.drawFastVLine(w / 2, 0, h, ST77XX_WHITE);
-  tft.drawFastHLine(0, h / 2, w, ST77XX_WHITE);
+  tft.drawFastVLine(rightX - (splitGap / 2), 0, h - barH, ST77XX_WHITE);
 
   // Bottom status bar
-  const uint16_t barH = 22;
   tft.fillRect(0, h - barH, w, barH, BAR_COLOR);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(8, h - 15);
   tft.println("CAR DASHBOARD  -  Falcon ESP32");
 
-  // Draw static inner frames once, then only update dynamic values.
-  drawSpeedGraph(speedGraphX, speedGraphY, speedGraphW, speedGraphH, true);
-  const uint16_t gaugeX = gap + 8;
-  const uint16_t gaugeY = bottomY + 74;
-  const uint16_t gaugeW = panelW - 16;
-  const uint16_t gaugeH = 16;
-  tft.drawRect(gaugeX, gaugeY, gaugeW, gaugeH, ST77XX_WHITE);
-
-  drawSpeedPanel(speedMph, wheelRpm, true);
+  drawSpeedDial(speedMph, true);
   drawFuelPanel(fuelPercent);
+  drawTempPanel(68.0f);
+  drawSpeedGraphPanel(speedMph);
 }
 
 void loop() {
@@ -659,6 +773,7 @@ void loop() {
     Serial.print("  mph=");
     Serial.println(speedMph, 0);
 
-    drawSpeedPanel(speedMph, wheelRpm, true);
+    drawSpeedDial(speedMph, false);
+    drawSpeedGraphPanel(speedMph);
   }
 }
