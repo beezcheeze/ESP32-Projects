@@ -30,6 +30,7 @@ const float SPEED_ADC_HIGH_THRESHOLD_V = 2.2f;
 const float SPEED_ADC_LOW_THRESHOLD_V = 1.2f;
 const uint32_t SPEED_IDLE_NOISE_PULSES = 0;
 const uint8_t SPEED_GRAPH_POINTS = 48;
+const float SPEED_GRAPH_MAX_MPH = 80.0f;
 const float SPEED_FREQ_FILTER_ALPHA = 0.25f;
 const float SPEED_ZERO_HOLD_HZ = 0.05f;
 const float SPEED_IDLE_BIAS_HZ = 0.0f;
@@ -151,25 +152,21 @@ void drawSpeedGraph(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool drawFra
     return;
   }
 
-  float graphMax = 10.0f;
-  for (uint8_t i = 0; i < speedGraphCount; i++) {
-    uint8_t idx = (speedGraphWriteIndex + SPEED_GRAPH_POINTS - speedGraphCount + i) % SPEED_GRAPH_POINTS;
-    if (speedGraphMph[idx] > graphMax) {
-      graphMax = speedGraphMph[idx];
-    }
-  }
+  const float graphMax = SPEED_GRAPH_MAX_MPH;
 
   float innerW = (float)(w - 3);
   float innerH = (float)(h - 3);
   int prevX = x + 1;
   uint8_t firstIdx = (speedGraphWriteIndex + SPEED_GRAPH_POINTS - speedGraphCount) % SPEED_GRAPH_POINTS;
-  int prevY = y + (int)innerH - (int)((speedGraphMph[firstIdx] / graphMax) * innerH);
+  float firstMph = constrain(speedGraphMph[firstIdx], 0.0f, graphMax);
+  int prevY = y + (int)innerH - (int)((firstMph / graphMax) * innerH);
 
   for (uint8_t i = 1; i < speedGraphCount; i++) {
     uint8_t idx = (speedGraphWriteIndex + SPEED_GRAPH_POINTS - speedGraphCount + i) % SPEED_GRAPH_POINTS;
     int graphX = x + 1 + (int)((i * innerW) / (speedGraphCount - 1));
-    int graphY = y + (int)innerH - (int)((speedGraphMph[idx] / graphMax) * innerH);
-    tft.drawLine(prevX, prevY, graphX, graphY, ST77XX_CYAN);
+    float sampleMph = constrain(speedGraphMph[idx], 0.0f, graphMax);
+    int graphY = y + (int)innerH - (int)((sampleMph / graphMax) * innerH);
+    tft.drawLine(prevX, prevY, graphX, graphY, ST77XX_BLUE);
     prevX = graphX;
     prevY = graphY;
   }
@@ -571,7 +568,20 @@ void drawSpeedDial(float mph, bool fullRedraw = false) {
   }
 
   if (speedNeedlePrevX >= 0 && speedNeedlePrevY >= 0) {
+    // Erase the previous thick needle using the same geometry used to draw it.
+    int16_t prevDx = speedNeedlePrevX - cx;
+    int16_t prevDy = speedNeedlePrevY - cy;
+    float prevLen = sqrtf((float)(prevDx * prevDx + prevDy * prevDy));
+    int16_t prevPerpX = (prevLen > 0.1f) ? (int16_t)(-prevDy * 2.0f / prevLen) : 0;
+    int16_t prevPerpY = (prevLen > 0.1f) ? (int16_t)(prevDx * 2.0f / prevLen) : 0;
+
+    tft.drawLine(cx - prevPerpX, cy - prevPerpY,
+                 speedNeedlePrevX - prevPerpX, speedNeedlePrevY - prevPerpY,
+                 BG_COLOR);
     tft.drawLine(cx, cy, speedNeedlePrevX, speedNeedlePrevY, BG_COLOR);
+    tft.drawLine(cx + prevPerpX, cy + prevPerpY,
+                 speedNeedlePrevX + prevPerpX, speedNeedlePrevY + prevPerpY,
+                 BG_COLOR);
   }
 
   float clampedMph = constrain(mph, 0.0f, SPEED_DIAL_MAX_MPH);
