@@ -389,7 +389,7 @@ void drawFuelPanel(int percent) {
   const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
   const uint16_t splitGap = 8;
   const uint16_t rightGap = 6;
-  const uint16_t barH = 22;
+  const uint16_t barH = 0;
   const uint16_t contentH = h - topGap - outerGap - barH;
   const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
   const uint16_t rightX = outerGap + leftW + splitGap;
@@ -407,13 +407,16 @@ void drawFuelPanel(int percent) {
   const uint16_t gaugeH = 10;
 
   const float tankGallons = 10.0f * (percent / 100.0f);
+  const float milesRemaining = tankGallons * 10.0f;  // Assuming 10 MPG
 
   char fuelText[24];
   char gallonsText[24];
   char voltageText[24];
+  char milesText[24];
   snprintf(fuelText, sizeof(fuelText), "%d %%", percent);
   snprintf(gallonsText, sizeof(gallonsText), "%.1f gal", tankGallons);
   snprintf(voltageText, sizeof(voltageText), "%.3f V", fuelVoltage);
+  snprintf(milesText, sizeof(milesText), "%.0f mi", milesRemaining);
 
   // Keep panel border static; only refresh value regions.
   tft.setTextColor(VALUE_COLOR, BG_COLOR);
@@ -424,12 +427,15 @@ void drawFuelPanel(int percent) {
 
   tft.setTextColor(ST77XX_WHITE, BG_COLOR);
   tft.setTextSize(1);
-  tft.fillRect(valueX, infoY, valueW, 14, BG_COLOR);
+  tft.fillRect(valueX, infoY, valueW, 16, BG_COLOR);
   tft.setCursor(valueX, infoY);
   tft.println(gallonsText);
 
   tft.setCursor(valueX + 74, infoY);
   tft.println(voltageText);
+
+  tft.setCursor(valueX, infoY + 10);
+  tft.println(milesText);
 
   // Draw a horizontal fuel gauge bar under the text.
   const uint16_t gaugeFillW = (uint16_t)((gaugeW - 2) * (percent / 100.0f));
@@ -463,7 +469,7 @@ void drawTempPanel(float tempF) {
   const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
   const uint16_t splitGap = 8;
   const uint16_t rightGap = 6;
-  const uint16_t barH = 22;
+  const uint16_t barH = 0;
   const uint16_t contentH = h - topGap - outerGap - barH;
   const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
   const uint16_t rightX = outerGap + leftW + splitGap;
@@ -494,7 +500,7 @@ void drawSpeedGraphPanel(float mph) {
   const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
   const uint16_t splitGap = 8;
   const uint16_t rightGap = 6;
-  const uint16_t barH = 22;
+  const uint16_t barH = 0;
   const uint16_t contentH = h - topGap - outerGap - barH;
   const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
   const uint16_t rightX = outerGap + leftW + splitGap;
@@ -516,7 +522,7 @@ void drawSpeedDial(float mph, bool fullRedraw = false) {
   const uint16_t outerGap = 6;
   const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
   const uint16_t splitGap = 8;
-  const uint16_t barH = 22;
+  const uint16_t barH = 0;
   const uint16_t contentH = h - topGap - outerGap - barH;
   const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
   const uint16_t leftX = outerGap;
@@ -613,7 +619,7 @@ void drawDashboard() {
   const uint16_t topGap = outerGap + DASH_TOP_OFFSET_PX;
   const uint16_t splitGap = 8;
   const uint16_t rightGap = 6;
-  const uint16_t barH = 22;
+  const uint16_t barH = 0;
   const uint16_t contentH = h - topGap - outerGap - barH;
   const uint16_t leftW = (uint16_t)(((w - 2 * outerGap - splitGap) * 55) / 100);
   const uint16_t rightX = outerGap + leftW + splitGap;
@@ -629,13 +635,6 @@ void drawDashboard() {
 
   // Divider lines for the physical 480x320 landscape screen
   tft.drawFastVLine(rightX - (splitGap / 2), 0, h - barH, ST77XX_WHITE);
-
-  // Bottom status bar
-  tft.fillRect(0, h - barH, w, barH, BAR_COLOR);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(8, h - 15);
-  tft.println("CAR DASHBOARD  -  Falcon ESP32");
 
   drawSpeedDial(speedMph, true);
   drawFuelPanel(fuelPercent);
