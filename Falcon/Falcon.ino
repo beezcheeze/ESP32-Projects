@@ -45,7 +45,7 @@ const float SPEED_CAL_TRUE_MPH_3 = 35.0f;
 const float SPEED_DIAL_MAX_MPH = 80.0f;
 const uint16_t DASH_TOP_OFFSET_PX = 20;
 const uint32_t FUEL_SAMPLE_INTERVAL_MS = 60000;
-const uint32_t FUEL_SUBSAMPLE_INTERVAL_MS = 5000;
+const uint32_t FUEL_SUBSAMPLE_INTERVAL_MS = 1000;
 const uint8_t FUEL_MODE_WINDOW_SAMPLES = (uint8_t)(FUEL_SAMPLE_INTERVAL_MS / FUEL_SUBSAMPLE_INTERVAL_MS);
 
 #define BG_COLOR      0x0000  // black
@@ -536,7 +536,7 @@ void drawSpeedDial(float mph, bool fullRedraw = false) {
 
     for (int mphTick = 0; mphTick <= (int)SPEED_DIAL_MAX_MPH; mphTick += 10) {
       float ratio = mphTick / SPEED_DIAL_MAX_MPH;
-      float angleDeg = -140.0f + (280.0f * ratio);
+      float angleDeg = 180.0f + (280.0f * ratio);
       float angleRad = angleDeg * 0.0174532925f;
 
       int16_t outerX = cx + (int16_t)((radius + 6) * cosf(angleRad));
@@ -569,12 +569,23 @@ void drawSpeedDial(float mph, bool fullRedraw = false) {
   }
 
   float clampedMph = constrain(mph, 0.0f, SPEED_DIAL_MAX_MPH);
-  float angleDeg = -140.0f + (280.0f * (clampedMph / SPEED_DIAL_MAX_MPH));
+  float angleDeg = 180.0f + (280.0f * (clampedMph / SPEED_DIAL_MAX_MPH));
   float angleRad = angleDeg * 0.0174532925f;
 
   int16_t needleX = cx + (int16_t)((radius - 14) * cosf(angleRad));
   int16_t needleY = cy + (int16_t)((radius - 14) * sinf(angleRad));
+  
+  // Draw thick needle with offset parallel lines
+  int16_t dx = needleX - cx;
+  int16_t dy = needleY - cy;
+  float needleLen = sqrtf((float)(dx * dx + dy * dy));
+  int16_t perpX = (needleLen > 0.1f) ? (int16_t)(-dy * 2.0f / needleLen) : 0;
+  int16_t perpY = (needleLen > 0.1f) ? (int16_t)(dx * 2.0f / needleLen) : 0;
+  
+  tft.drawLine(cx - perpX, cy - perpY, needleX - perpX, needleY - perpY, ST77XX_RED);
   tft.drawLine(cx, cy, needleX, needleY, ST77XX_RED);
+  tft.drawLine(cx + perpX, cy + perpY, needleX + perpX, needleY + perpY, ST77XX_RED);
+  
   tft.fillCircle(cx, cy, 4, ST77XX_WHITE);
 
   speedNeedlePrevX = needleX;
