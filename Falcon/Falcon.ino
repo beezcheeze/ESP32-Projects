@@ -422,6 +422,20 @@ void drawFuelPanel(int percent) {
   tft.setCursor(valueX, valueY);
   tft.println(fuelText);
 
+  // Show low fuel warning to the right of the percentage when below 25%.
+  const uint16_t warningX = valueX + 74;
+  const uint16_t warningY = valueY + 2;
+  const uint16_t warningW = (valueW > 74) ? (valueW - 74) : 0;
+  if (warningW > 0) {
+    tft.fillRect(warningX, warningY, warningW, 12, BG_COLOR);
+    if (percent < 25) {
+      tft.setTextColor(ST77XX_RED, BG_COLOR);
+      tft.setTextSize(1);
+      tft.setCursor(warningX, warningY + 2);
+      tft.print("LOW FUEL");
+    }
+  }
+
   tft.setTextColor(ST77XX_WHITE, BG_COLOR);
   tft.setTextSize(1);
   tft.fillRect(valueX, infoY, valueW, 16, BG_COLOR);
